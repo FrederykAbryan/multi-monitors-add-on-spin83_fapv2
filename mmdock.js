@@ -135,12 +135,8 @@ export class MultiMonitorsDock {
         if (!adjustment || adjustment === this._stateAdjustment)
             return;
 
-        if (this._stateAdjustment && this._stateAdjustmentId) {
-            try {
-                this._stateAdjustment.disconnect(this._stateAdjustmentId);
-            } catch (_e) {
-            }
-        }
+        if (this._stateAdjustment && this._stateAdjustmentId)
+            this._stateAdjustment.disconnect(this._stateAdjustmentId);
 
         this._stateAdjustment = adjustment;
         this._stateAdjustmentId = adjustment.connect('notify::value',
@@ -275,44 +271,29 @@ export class MultiMonitorsDock {
         this._destroying = true;
 
         if (this._overviewShowingId) {
-            try {
-                Main.overview.disconnect(this._overviewShowingId);
-            } catch (_e) {
-            }
+            Main.overview.disconnect(this._overviewShowingId);
             this._overviewShowingId = null;
         }
 
         if (this._overviewHidingId) {
-            try {
-                Main.overview.disconnect(this._overviewHidingId);
-            } catch (_e) {
-            }
+            Main.overview.disconnect(this._overviewHidingId);
             this._overviewHidingId = null;
         }
 
         if (this._stateAdjustment && this._stateAdjustmentId) {
-            try {
-                this._stateAdjustment.disconnect(this._stateAdjustmentId);
-            } catch (_e) {
-            }
+            this._stateAdjustment.disconnect(this._stateAdjustmentId);
             this._stateAdjustment = null;
             this._stateAdjustmentId = null;
         }
 
         const showAppsButton = this._getLocalShowAppsButton();
         if (showAppsButton && this._showAppsButtonId) {
-            try {
-                showAppsButton.disconnect(this._showAppsButtonId);
-            } catch (_e) {
-            }
+            showAppsButton.disconnect(this._showAppsButtonId);
             this._showAppsButtonId = null;
         }
 
         if (this._dash && this._heightChangedId) {
-            try {
-                this._dash.disconnect(this._heightChangedId);
-            } catch (_e) {
-            }
+            this._dash.disconnect(this._heightChangedId);
             this._heightChangedId = null;
         }
 

@@ -90,8 +90,15 @@ if (this._signalId) {
 }
 ```
 
-### Do not wrap disconnect in try-catch
-Signal IDs should be disconnected from the same object that created them. If a disconnect can fail, fix ownership and reference cleanup instead of swallowing the error.
+### Do not wrap `disconnect()` or `disconnectObject()` in try-catch
+This applies to **both** forms, with no exceptions:
+
+- `object.disconnect(id)` — the ID was created by us against that same object.
+- `object.disconnectObject(this)` — a no-op when nothing is connected, so it cannot throw
+  for the reason people usually guard against.
+
+If a disconnect can fail, the object reference is stale — fix ownership and reference cleanup
+instead of swallowing the error. Null-check the *reference*, never the call.
 
 ```javascript
 // ❌ Bad - masks stale object references
@@ -100,11 +107,20 @@ try {
 } catch (_e) {
 }
 
+// ❌ Bad - disconnectObject is already a no-op; the catch only hides a dead reference
+try {
+    this._adjustment.disconnectObject(this);
+} catch (_e) {
+}
+
 // ✅ Good
 if (this._signalId) {
     this._source.disconnect(this._signalId);
     this._signalId = null;
 }
+
+// ✅ Good - guard the nullable reference, then call plainly
+this._adjustment?.disconnectObject(this);
 ```
 
 ---
@@ -157,13 +173,64 @@ destroy() {
 
 ---
 
+## Defensive Checks
+
+### Do not guard methods that are guaranteed to exist
+`?.()` and `typeof x === 'function'` on GNOME/Clutter/St API is noise. A `St.Widget` always has
+`get_first_child()`; a `Clutter.Event` always has `get_button()`. Guarding them says the author did
+not know the type, which reviewers read as machine-generated code. Call them directly.
+
+```javascript
+// ❌ Bad - these methods cannot be missing
+const child = this._sourceIndicator?.get_first_child?.();
+actor.remove_style_pseudo_class?.('active');
+if (event?.get_button?.() === Clutter.BUTTON_SECONDARY)
+
+// ✅ Good
+const child = this._sourceIndicator.get_first_child();
+actor.remove_style_pseudo_class('active');
+if (event.get_button() === Clutter.BUTTON_SECONDARY)
+```
+
+`?.` on a *reference* that is legitimately nullable is fine — the problem is `?.` on the **call**,
+and chains that guard both at once (`a?.b?.()`). Null-check the reference once, then call plainly.
+
+```javascript
+// ❌ Bad - guards the call as well as the reference
+this._sourceIndicator?.get_first_child?.()?.disconnectObject?.(this);
+
+// ✅ Good - the reference may be null; the method may not
+const child = this._sourceIndicator?.get_first_child();
+child?.disconnectObject(this);
+```
+
+### Do not guard our own methods
+Methods we define on our own classes always exist. `p?._ensureVitalsMirrorRightSide?.()` on our own
+panel objects is guarding against a bug we would want to see, not a real condition.
+
+### Duck-typing foreign extensions is legitimate — comment why
+Third-party extensions (ArcMenu, Blur My Shell, Clipboard Indicator) are genuinely optional and their
+APIs genuinely vary. Keep those checks, but name the extension so the intent is unambiguous.
+
+```javascript
+// ✅ Good - ArcMenu is optional and its API differs across releases
+if (typeof this._sourceIndicator.toggleMenu === 'function')
+    return this._openArcMenu();
+```
+
+### Version compatibility must reference a version
+A `typeof` check for shell-version differences is fine when the difference is real and the comment
+says which versions differ. If it applies to every version in `shell-version`, delete it.
+
+---
+
 ## Error Handling
 
 ### Use try-catch only when necessary
 - ✅ Version-specific API calls that may not exist
 - ✅ External/async operations that can genuinely fail
 - ❌ Simple property access or safe operations
-- ❌ Normal `disconnect()` or `GLib.source_remove()` cleanup
+- ❌ Normal `disconnect()`, `disconnectObject()`, or `GLib.source_remove()` cleanup
 - ❌ Compatibility checks for stable GNOME Shell properties, such as treating `sessionMode.isLocked` as either a function or property in code that targets versions where it is known
 - ❌ Empty catch blocks with `// ignore`
 

@@ -62,8 +62,8 @@ const MultiMonitorsAppMenuButton = GObject.registerClass(
             this._targetAppGroup = null;
             this._lastFocusedWindow = null;
 
-            // Call parent init if Panel.AppMenuButton exists
-            if (typeof Panel !== 'undefined' && Panel.AppMenuButton && Panel.AppMenuButton.prototype._init) {
+            // Panel.AppMenuButton exists on GNOME 45 but was removed in 46.
+            if (Panel.AppMenuButton) {
                 Panel.AppMenuButton.prototype._init.call(this, panel);
             } else {
                 super._init(0.0, null, false);
@@ -183,10 +183,9 @@ const MultiMonitorsAppMenuButton = GObject.registerClass(
         _sync() {
             if (!this._switchWorkspaceNotifyId)
                 return;
-            // Call parent sync if Panel.AppMenuButton exists
-            if (typeof Panel !== 'undefined' && Panel.AppMenuButton && Panel.AppMenuButton.prototype._sync) {
+            // Panel.AppMenuButton exists on GNOME 45 but was removed in 46.
+            if (Panel.AppMenuButton)
                 Panel.AppMenuButton.prototype._sync.call(this);
-            }
 
             this._syncAppMenuIconGeometry();
         }
@@ -206,7 +205,7 @@ const MultiMonitorsAppMenuButton = GObject.registerClass(
             iconBox.x_align = Clutter.ActorAlign.CENTER;
             iconBox.y_align = Clutter.ActorAlign.CENTER;
 
-            const icon = iconBox.child || iconBox.get_first_child?.();
+            const icon = iconBox.child || iconBox.get_first_child();
             if (icon) {
                 icon.set_size(iconSize, iconSize);
                 icon.x_expand = false;
@@ -217,10 +216,11 @@ const MultiMonitorsAppMenuButton = GObject.registerClass(
         }
 
         _findChildByStyleClass(actor, styleClass) {
-            if (actor.has_style_class_name?.(styleClass))
+            // Style classes are St.Widget-only; the tree also contains plain Clutter actors.
+            if (actor instanceof St.Widget && actor.has_style_class_name(styleClass))
                 return actor;
 
-            const children = actor.get_children ? actor.get_children() : [];
+            const children = actor.get_children();
             for (const child of children) {
                 const found = this._findChildByStyleClass(child, styleClass);
                 if (found)
@@ -837,10 +837,8 @@ const MultiMonitorsPanel = GObject.registerClass(
             }
 
             // Fallbacks when pointer is outside monitor bounds during transitions.
-            const actorMonitor = typeof Main.layoutManager.findIndexForActor === 'function'
-                ? Main.layoutManager.findIndexForActor(this)
-                : -1;
-            if (actorMonitor !== -1 && actorMonitor !== undefined && actorMonitor !== null)
+            const actorMonitor = Main.layoutManager.findIndexForActor(this);
+            if (actorMonitor !== -1)
                 return actorMonitor;
 
             return this.monitorIndex;
@@ -894,7 +892,9 @@ const MultiMonitorsPanel = GObject.registerClass(
         }
 
         _beginWindowGrab(dragWindow, event, x, y, button = -1) {
-            if (dragWindow && typeof dragWindow.begin_grab_op === 'function') {
+            // GNOME 50 moved begin_grab_op onto Meta.Window with a Graphene.Point;
+            // 45-49 only have the older Meta.Display signature below.
+            if (typeof dragWindow.begin_grab_op === 'function') {
                 const coords = new Graphene.Point({ x, y });
                 dragWindow.begin_grab_op(
                     Meta.GrabOp.MOVING,
@@ -904,7 +904,7 @@ const MultiMonitorsPanel = GObject.registerClass(
                 return true;
             }
 
-            if (global.display && typeof global.display.begin_grab_op === 'function') {
+            if (typeof global.display.begin_grab_op === 'function') {
                 return global.display.begin_grab_op(
                     dragWindow,
                     Meta.GrabOp.MOVING,

@@ -746,10 +746,11 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             if (!actor)
                 return false;
 
+            // Touching a property on a finalized GObject throws in GJS. That is
+            // the only reliable liveness signal for a reference we retained
+            // across a monitor or session change.
             try {
-                if (actor.is_destroyed?.())
-                    return false;
-                return true;
+                return actor.mapped !== undefined;
             } catch (_e) {
                 return false;
             }
@@ -794,12 +795,7 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             if (!adjustment || adjustment === this._overviewStateAdjustment)
                 return;
 
-            if (this._overviewStateAdjustment) {
-                try {
-                    this._overviewStateAdjustment.disconnectObject(this);
-                } catch (_e) {
-                }
-            }
+            this._overviewStateAdjustment?.disconnectObject(this);
 
             this._overviewStateAdjustment = adjustment;
             // connectObject(..., this) auto-disconnects on destroy.
@@ -995,12 +991,13 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
 
                 if (shellApp) {
                     // Set up a window-created listener to catch the new window
-                    const windowCreatedId = global.display.connect('window-created', (display, window) => {
+                    let windowCreatedId = global.display.connect('window-created', (display, window) => {
                         // Check if this window belongs to our app
                         const windowApp = Shell.WindowTracker.get_default().get_window_app(window);
                         if (windowApp && windowApp.get_id() === shellApp.get_id()) {
                             // Disconnect immediately
                             global.display.disconnect(windowCreatedId);
+                            windowCreatedId = 0;
 
                             // Move window to target monitor after it's fully created
                             const moveTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 100, () => {
@@ -1015,10 +1012,9 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
                     // Auto-disconnect after 5 seconds to prevent memory leaks
                     const disconnectTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 5000, () => {
                         this._pendingTimeouts = this._pendingTimeouts.filter(id => id !== disconnectTimeoutId);
-                        try {
+                        if (windowCreatedId) {
                             global.display.disconnect(windowCreatedId);
-                        } catch (e) {
-                            // Already disconnected
+                            windowCreatedId = 0;
                         }
                         return GLib.SOURCE_REMOVE;
                     });
@@ -1451,14 +1447,48 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
                 }
 
                 if (workspacesDisplay && workspacesDisplay._workspacesViews && workspacesDisplay._workspacesViews[this._monitorIndex]) {
-                    this._workspacesViews = workspacesDisplay._workspacesViews[this._monitorIndex];
+                    this._setWorkspacesViews(workspacesDisplay._workspacesViews[this._monitorIndex]);
                     console.debug('[MultiMonitors] Lazy discovery: Found workspacesView for monitor ' + this._monitorIndex);
                 } else if (workspacesDisplay && workspacesDisplay._primaryWorkspacesView && this._monitorIndex === Main.layoutManager.primaryIndex) {
-                    this._workspacesViews = workspacesDisplay._primaryWorkspacesView;
+                    this._setWorkspacesViews(workspacesDisplay._primaryWorkspacesView);
                     console.debug('[MultiMonitors] Lazy discovery: Found primary workspacesView');
                 }
             } catch (_e) {
                 this._disconnectAll(false);
+            }
+        }
+
+        _setWorkspacesViews(view) {
+            // `view` is a borrowed reference to GNOME Shell's own workspacesView
+            // (SecondaryMonitorDisplay / WorkspacesView). Shell destroys and
+            // recreates these on monitor and overview-state changes, so a cached
+            // reference goes stale. Probing it later with a property read (see
+            // _isActorUsable) or writing a transform touches a disposed GObject,
+            // which spams the journal with "already disposed" and can throw.
+            //
+            // Instead, track its `destroy` signal and drop our reference the
+            // moment Shell tears it down (before finalization) so we never
+            // touch a disposed object. connectObject(..., this) also auto-cleans
+            // when this manager itself is destroyed.
+            if (view === this._workspacesViews)
+                return;
+
+            this._workspacesViews?.disconnectObject(this);
+
+            this._workspacesViews = view;
+            this._lastWorkspaceTransformKey = null;
+
+            if (!view)
+                return;
+
+            try {
+                view.connectObject('destroy', () => {
+                    this._workspacesViews = null;
+                    this._lastWorkspaceTransformKey = null;
+                }, this);
+            } catch (_e) {
+                // If we cannot even connect, the reference is not trustworthy.
+                this._workspacesViews = null;
             }
         }
 
@@ -1534,25 +1564,18 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
 
             // All handlers were connected with connectObject(..., this), so a
             // single disconnectObject(this) per source removes them.
-            try {
-                Main.overview.searchController?.disconnectObject(this);
-            } catch (_e) {
-            }
-            try {
-                Main.layoutManager.disconnectObject(this);
-            } catch (_e) {
-            }
-            if (this._overviewStateAdjustment) {
-                try {
-                    this._overviewStateAdjustment.disconnectObject(this);
-                } catch (_e) {
-                }
-                this._overviewStateAdjustment = null;
-            }
+            Main.overview.searchController?.disconnectObject(this);
+            Main.layoutManager.disconnectObject(this);
+            this._overviewStateAdjustment?.disconnectObject(this);
+            this._overviewStateAdjustment = null;
             if (resetTransforms)
                 this._resetWorkspacesViewTransform();
-            else
-                this._workspacesViews = null;
+            // Drop the borrowed workspacesView's `destroy` handler. connectObject
+            // auto-cleans when this actor is finalized, but this covers the paths
+            // where _disconnectAll runs without our own destruction.
+            this._workspacesViews?.disconnectObject(this);
+            this._workspacesViews = null;
+            this._lastWorkspaceTransformKey = null;
             this._focusedApp = null;
             this._searchEntry = null;
         }

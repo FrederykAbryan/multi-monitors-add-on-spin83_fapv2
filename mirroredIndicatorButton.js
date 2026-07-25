@@ -95,14 +95,12 @@ export const MirroredIndicatorButton = GObject.registerClass(
             // source indicator's real menu. We never use the default menu.
             super._init(0.0, null, true);
 
-            this._destroyed = false;
-            // Cleanup MUST run from the `destroy` SIGNAL, not only the destroy()
-            // method. When a parent panel is destroyed from C code (e.g. a
-            // monitor disappears on resume from sleep), Clutter destroys its
-            // children without ever calling our JS destroy() override. Without
-            // this, handlers connected to surviving Main.panel indicators stay
-            // live and fire against this already-disposed actor, which floods
-            // the log with "already disposed" errors and crashes gnome-shell.
+            // Cleanup runs from the `destroy` SIGNAL only. When a parent panel
+            // is destroyed from C code (e.g. a monitor disappears on resume),
+            // Clutter destroys children without calling our JS destroy()
+            // override, but the `destroy` signal still fires. super.destroy()
+            // (explicit path) also emits this signal, so _cleanup runs exactly
+            // once in both cases — no guard flag needed.
             this.connect('destroy', () => this._cleanup());
 
             this._role = role;
@@ -241,7 +239,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
             // this, handlers on the surviving Main.panel source indicator fire
             // against the disposed button and crash gnome-shell.
             const watch = (obj, signal) => {
-                if (!obj || typeof obj.connectObject !== 'function')
+                if (!obj)
                     return;
                 try {
                     obj.connectObject(signal, scheduleSync, this);
@@ -254,7 +252,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
             watch(this._sourceIndicator, 'notify::mapped');
             watch(this._sourceIndicator, 'notify::allocation');
 
-            const sourceChild = this._sourceIndicator?.get_first_child?.();
+            const sourceChild = this._sourceIndicator?.get_first_child();
             watch(sourceChild, 'notify::visible');
             watch(sourceChild, 'notify::mapped');
             watch(sourceChild, 'notify::allocation');
@@ -265,14 +263,12 @@ export const MirroredIndicatorButton = GObject.registerClass(
         }
 
         _syncMirrorPresence() {
-            if (this._destroyed)
+            // After cleanup, _sourceIndicator is null. Bail without touching
+            // this actor — setting properties on a disposed GObject throws.
+            if (!this._sourceIndicator)
                 return;
-            if (!this._sourceIndicator) {
-                this._markEmpty();
-                return;
-            }
 
-            const sourceChild = this._sourceIndicator.get_first_child?.();
+            const sourceChild = this._sourceIndicator.get_first_child();
             const hasContent = this._sourceIndicator.visible &&
                 sourceChild &&
                 this._hasVisibleRenderableSourceContent(sourceChild);
@@ -491,8 +487,19 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 this._workspaceNameLabelChangedId = sourceMenu.connect(
                     'active-name-changed',
                     () => {
-                        if (this._workspaceNameLabel)
+                        // The label's GObject can be disposed from C code (panel
+                        // rebuild / monitor gone on resume) before _cleanup
+                        // disconnects this signal and nulls the JS reference.
+                        // Touching a property on a finalized GObject throws in
+                        // GJS — catch it instead of flooding the log with
+                        // "already disposed" warnings.
+                        if (!this._workspaceNameLabel)
+                            return;
+                        try {
                             this._workspaceNameLabel.set_text(sourceMenu.activeName ?? '');
+                        } catch (_e) {
+                            this._workspaceNameLabel = null;
+                        }
                     });
             } catch (_e) {
                 this._workspaceNameLabelChangedId = 0;
@@ -531,12 +538,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 this._workspaceIndicatorModeWatchId)
                 return;
 
-            if (this._workspaceIndicatorModeWatchSource && this._workspaceIndicatorModeWatchId) {
-                try {
-                    this._workspaceIndicatorModeWatchSource.disconnect(this._workspaceIndicatorModeWatchId);
-                } catch (_e) {
-                }
-            }
+            if (this._workspaceIndicatorModeWatchSource && this._workspaceIndicatorModeWatchId)
+                this._workspaceIndicatorModeWatchSource.disconnect(this._workspaceIndicatorModeWatchId);
 
             this._workspaceIndicatorModeWatchSource = thumbnails;
             this._workspaceIndicatorModeWatchId = thumbnails.connect('notify::visible',
@@ -558,11 +561,11 @@ export const MirroredIndicatorButton = GObject.registerClass(
             if (!this._sourceIndicator)
                 return;
 
-            const sourceChild = this._sourceIndicator.get_first_child?.();
+            const sourceChild = this._sourceIndicator.get_first_child();
             if (!sourceChild)
                 return;
 
-            const nextMode = this._sourceIndicator?._thumbnails?.visible
+            const nextMode = this._sourceIndicator._thumbnails?.visible
                 ? 'previews'
                 : 'name-label';
             if (nextMode === this._workspaceIndicatorMode)
@@ -613,11 +616,11 @@ export const MirroredIndicatorButton = GObject.registerClass(
             // Source-presence handlers were connected with connectObject(this);
             // GJS auto-disconnects them on destroy, but disconnect explicitly
             // for the non-destroy cleanup path too.
-            this._sourceIndicator?.disconnectObject?.(this);
-            this._sourceIndicator?.get_first_child?.()?.disconnectObject?.(this);
+            this._sourceIndicator?.disconnectObject(this);
+            this._sourceIndicator?.get_first_child()?.disconnectObject(this);
             this._sourcePresenceWatched = false;
 
-            const children = this.get_children ? this.get_children() : [];
+            const children = this.get_children();
             for (const child of children)
                 this.remove_child(child);
         }
@@ -681,12 +684,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
             if (!this._workspacePreviewWindowSignalIds)
                 return;
 
-            for (const { object, id } of this._workspacePreviewWindowSignalIds) {
-                try {
-                    object.disconnect(id);
-                } catch (_e) {
-                }
-            }
+            for (const { object, id } of this._workspacePreviewWindowSignalIds)
+                object.disconnect(id);
 
             this._workspacePreviewWindowSignalIds = [];
         }
@@ -837,6 +836,15 @@ export const MirroredIndicatorButton = GObject.registerClass(
 
             this._clockSourceDisplay = null;
             this._clockDisplay = null;
+        }
+
+        _disconnectLabelCopyBindings() {
+            if (this._labelCopyBindings) {
+                for (const binding of this._labelCopyBindings)
+                    binding.unbind();
+            }
+
+            this._labelCopyBindings = [];
         }
 
         _createSimpleClone(parent, source) {
@@ -998,9 +1006,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 });
                 
                 this.connect('destroy', () => {
-                    if (child && visId) {
-                        try { child.disconnect(visId); } catch(e) {}
-                    }
+                    if (child && visId)
+                        child.disconnect(visId);
                     // Restore source state modified by _setupAstraProxyEvents.
                     // Astra children are shared by every mirrored panel, so only
                     // unhook the tooltip after the last proxy is gone.
@@ -1253,10 +1260,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 restored = true;
 
                 if (openStateId) {
-                    try {
-                        menu.disconnect(openStateId);
-                    } catch (_e) {
-                    }
+                    menu.disconnect(openStateId);
                     openStateId = 0;
                 }
 
@@ -1265,10 +1269,10 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 if (originalAddPseudoClass)
                     targetChild.add_style_pseudo_class = originalAddPseudoClass;
 
-                targetChild.remove_style_pseudo_class?.('active');
-                targetChild.remove_style_pseudo_class?.('checked');
-                proxy.remove_style_pseudo_class?.('active');
-                proxy.remove_style_pseudo_class?.('checked');
+                targetChild.remove_style_pseudo_class('active');
+                targetChild.remove_style_pseudo_class('checked');
+                proxy.remove_style_pseudo_class('active');
+                proxy.remove_style_pseudo_class('checked');
 
                 if (this._astraMenuRestoreId)
                     GLib.source_remove(this._astraMenuRestoreId);
@@ -1315,8 +1319,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 if (isOpen) {
                     proxy.add_style_pseudo_class('active');
                     proxy.add_style_pseudo_class('checked');
-                    targetChild.remove_style_pseudo_class?.('active');
-                    targetChild.remove_style_pseudo_class?.('checked');
+                    targetChild.remove_style_pseudo_class('active');
+                    targetChild.remove_style_pseudo_class('checked');
                 } else {
                     restoreAfterClose();
                 }
@@ -1576,6 +1580,10 @@ export const MirroredIndicatorButton = GObject.registerClass(
         }
 
         _copyIconsFromSource(container, source) {
+            // Release label bindings from the previous build before the copies
+            // they target are removed/disposed below.
+            this._disconnectLabelCopyBindings();
+
             // Remove existing children
             container.remove_all_children();
 
@@ -1618,7 +1626,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                     }
 
                     const groupCopy = new St.BoxLayout({
-                        style_class: child.get_style_class_name?.() || '',
+                        style_class: (child instanceof St.Widget && child.get_style_class_name()) || '',
                         x_align: Clutter.ActorAlign.CENTER,
                         y_align: Clutter.ActorAlign.CENTER,
                         y_expand: false,
@@ -1720,12 +1728,18 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 y_align: Clutter.ActorAlign.CENTER,
             });
 
-            // A native binding is released automatically when either label is
-            // finalized. Do not attach JS callbacks to St.Label::destroy: GJS
-            // 1.86 (GNOME 50) blocks those callbacks if finalization happens
-            // while SpiderMonkey is sweeping the wrappers.
-            sourceLabel.bind_property(
+            // The binding outlives labelCopy.destroy(): it is released only
+            // when *either* label is finalized (GC'd), and sourceLabel is the
+            // long-lived panel label. Track the binding so we can unbind() it
+            // on the next rebuild / cleanup. Otherwise each 5s rebuild orphans
+            // a copy whose disposed St.Label still receives source 'text'
+            // updates -> "St.Label has been already disposed" spam.
+            // Do not attach JS callbacks to St.Label::destroy: GJS 1.86
+            // (GNOME 50) blocks those callbacks if finalization happens while
+            // SpiderMonkey is sweeping the wrappers.
+            const binding = sourceLabel.bind_property(
                 'text', labelCopy, 'text', GObject.BindingFlags.SYNC_CREATE);
+            (this._labelCopyBindings ??= []).push(binding);
 
             return labelCopy;
         }
@@ -1736,7 +1750,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
 
             const wrapper = new St.Widget({
                 layout_manager: new Clutter.BinLayout(),
-                style_class: source.get_style_class_name?.() || '',
+                style_class: (source instanceof St.Widget && source.get_style_class_name()) || '',
                 x_align: Clutter.ActorAlign.CENTER,
                 y_align: Clutter.ActorAlign.CENTER,
                 x_expand: false,
@@ -1787,7 +1801,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 gicon: icon.gicon,
                 icon_name: icon.icon_name || 'edit-paste-symbolic',
                 icon_size: Math.min(this._getSourceIconSize(icon), 16),
-                style_class: icon.get_style_class_name?.() || 'system-status-icon',
+                style_class: icon.get_style_class_name() || 'system-status-icon',
                 x_align: Clutter.ActorAlign.CENTER,
                 y_align: Clutter.ActorAlign.CENTER,
                 x_expand: false,
@@ -1989,13 +2003,13 @@ export const MirroredIndicatorButton = GObject.registerClass(
             }
 
             if (this._role === 'workspace-indicator') {
-                if (event?.get_button?.() === Clutter.BUTTON_SECONDARY &&
+                if (event?.get_button() === Clutter.BUTTON_SECONDARY &&
                     this._sourceIndicator?.menu) {
                     return this._openWorkspaceIndicatorMenu();
                 }
 
                 if (this._sourceIndicator?._thumbnails?.visible &&
-                    event?.get_button?.() === Clutter.BUTTON_PRIMARY &&
+                    event?.get_button() === Clutter.BUTTON_PRIMARY &&
                     this._activateWorkspacePreviewAt(event)) {
                     return Clutter.EVENT_STOP;
                 }
@@ -2160,10 +2174,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 restored = true;
 
                 if (openStateId) {
-                    try {
-                        menu.disconnect(openStateId);
-                    } catch (_e) {
-                    }
+                    menu.disconnect(openStateId);
                     openStateId = 0;
                 }
 
@@ -2341,8 +2352,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 if (!actor)
                     continue;
 
-                actor.remove_style_pseudo_class?.('active');
-                actor.remove_style_pseudo_class?.('checked');
+                actor.remove_style_pseudo_class('active');
+                actor.remove_style_pseudo_class('checked');
             }
         }
 
@@ -2365,11 +2376,11 @@ export const MirroredIndicatorButton = GObject.registerClass(
             }
 
             const thumbnailsBox = this._sourceIndicator?._thumbnails?._thumbnailsBox;
-            const sourceChild = this._sourceIndicator?.get_first_child?.();
-            if (!thumbnailsBox || !sourceChild || !event?.get_coords)
+            const sourceChild = this._sourceIndicator?.get_first_child();
+            if (!thumbnailsBox || !sourceChild || !event)
                 return false;
 
-            const previews = thumbnailsBox.get_children ? thumbnailsBox.get_children() : [];
+            const previews = thumbnailsBox.get_children();
             if (previews.length === 0)
                 return false;
 
@@ -2613,10 +2624,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 }
 
                 if (openStateId) {
-                    try {
-                        menu.disconnect(openStateId);
-                    } catch (_e) {
-                    }
+                    menu.disconnect(openStateId);
                     openStateId = 0;
                 }
 
@@ -2779,10 +2787,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 restored = true;
 
                 if (openStateId) {
-                    try {
-                        menu.disconnect(openStateId);
-                    } catch (_e) {
-                    }
+                    menu.disconnect(openStateId);
                     openStateId = 0;
                 }
 
@@ -2910,10 +2915,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 restored = true;
 
                 if (openStateId) {
-                    try {
-                        menu.disconnect(openStateId);
-                    } catch (_e) {
-                    }
+                    menu.disconnect(openStateId);
                     openStateId = 0;
                 }
 
@@ -3171,11 +3173,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
         }
 
         _cleanup() {
-            if (this._destroyed)
-                return;
-            this._destroyed = true;
-
             this._disconnectMirroredClockDisplay();
+            this._disconnectLabelCopyBindings();
             this._disconnectIconSyncSource();
 
             if (this._forwardClickTimeoutId) {
@@ -3352,8 +3351,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
             // Source-presence handlers were connected with connectObject(this);
             // GJS auto-disconnects them on destroy, but disconnect explicitly
             // for the non-destroy cleanup path too.
-            this._sourceIndicator?.disconnectObject?.(this);
-            this._sourceIndicator?.get_first_child?.()?.disconnectObject?.(this);
+            this._sourceIndicator?.disconnectObject(this);
+            this._sourceIndicator?.get_first_child()?.disconnectObject(this);
             this._sourcePresenceWatched = false;
 
             if (this._role === 'activities') {
@@ -3381,7 +3380,10 @@ export const MirroredIndicatorButton = GObject.registerClass(
         }
 
         destroy() {
-            this._cleanup();
+            // super.destroy() emits the `destroy` signal, which runs _cleanup.
+            // This keeps a single cleanup path for both explicit destroy()
+            // and C-side destruction (monitor gone on resume), so no guard
+            // flag is needed.
             super.destroy();
         }
     });

@@ -204,22 +204,7 @@ export class MultiMonitorsPanelBox {
  * This is critical to prevent the lock screen from using stale geometry.
  */
 function _forceUpdateRegions() {
-	try {
-		// Try the synchronous private method first
-		if (typeof Main.layoutManager._updateRegions === 'function') {
-			Main.layoutManager._updateRegions();
-			return;
-		}
-	} catch (e) {
-		// Fall through to alternatives
-	}
-	try {
-		// Fallback: queue the update (async, but better than nothing)
-		if (typeof Main.layoutManager._queueUpdateRegions === 'function')
-			Main.layoutManager._queueUpdateRegions();
-	} catch (e) {
-		// Ignore
-	}
+	Main.layoutManager._updateRegions();
 }
 
 export class MultiMonitorsLayoutManager {
@@ -638,9 +623,8 @@ export class MultiMonitorsLayoutManager {
 
 		const mmPanelRef = getMMPanelArray();
 		if (mmPanelRef) {
-			for (const panel of mmPanelRef) {
-				panel?.queue_relayout?.();
-			}
+			for (const panel of mmPanelRef)
+				panel.queue_relayout();
 		}
 	}
 

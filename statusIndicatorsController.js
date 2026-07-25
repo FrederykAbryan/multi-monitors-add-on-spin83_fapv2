@@ -135,13 +135,11 @@ export class StatusIndicatorsController {
 	_extensionStateChanged() {
 		this._findAvailableIndicators();
 		this.transferIndicators();
-		// Ensure mirrored indicators are positioned correctly (e.g., Vitals)
+		// Ensure mirrored indicators are positioned correctly
 		const panels = Constants.getMMPanelArray();
 		if (panels) {
-			for (const p of panels) {
-				p?._ensureVitalsMirrorRightSide?.();
-				p?._ensureQuickSettingsRightmost?.();
-			}
+			for (const p of panels)
+				p._ensureQuickSettingsRightmost();
 		}
 	}
 
