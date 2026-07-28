@@ -1537,8 +1537,13 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 return;
             }
 
-            this._syncStaticCopyContainerSize(container, source);
+            // Parent first: sizing asks the container (and the copied icon) for
+            // their preferred size, which needs a theme node. Off-stage actors
+            // have none, so doing it the other way round both logs
+            // "st_widget_get_theme_node called on [...] which is not in the stage"
+            // and measures without the theme's padding.
             parent.add_child(container);
+            this._syncStaticCopyContainerSize(container, source);
             this._bindIconSyncSource(container, source);
 
             // Periodically sync icons (every 5 seconds) to catch icon changes

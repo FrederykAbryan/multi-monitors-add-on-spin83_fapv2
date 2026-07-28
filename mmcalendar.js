@@ -610,8 +610,16 @@ var MultiMonitorsDateMenuButton = (() => {
 
     let MultiMonitorsDateMenuButton = class MultiMonitorsDateMenuButton extends BaseDateMenuButton {
         _init(panel = null) {
+            // Upstream's date menu is built once and lives as long as the session,
+            // so it never disconnects from the shell singletons or from its
+            // calendar event source. Our copies are destroyed on every monitor
+            // change, so record what super._init() wires up and drop it again in
+            // _onDestroy().
+            this._mmGlobalSignals = [];
+            this._mmEventSourceIds = [];
+
             if (DateMenu.DateMenuButton) {
-                super._init();
+                this._mmTrackSingletonSignals(() => super._init());
                 this._panel = panel;
                 this._syncMultiMonitorPanelStyle();
                 return;
@@ -802,6 +810,103 @@ var MultiMonitorsDateMenuButton = (() => {
             }
         }
 
+        _mmTrackSingletonSignals(callback) {
+            // Shell-wide objects upstream connects to with a plain connect() and
+            // never disconnects from: Main.sessionMode 'updated' (DateMenuButton),
+            // Main.messageTray 'source-added'/'source-removed'/'queue-changed'
+            // (MessagesIndicator) and Shell.AppSystem 'installed-changed'
+            // (EventsSection, WorldClocksSection).
+            const singletons = [];
+            if (MainRef?.sessionMode)
+                singletons.push(MainRef.sessionMode);
+            if (MainRef?.messageTray)
+                singletons.push(MainRef.messageTray);
+            try {
+                singletons.push(Shell.AppSystem.get_default());
+            } catch (_e) {
+                // No app system (should not happen); nothing to track.
+            }
+
+            for (const object of singletons) {
+                const connect = object.connect.bind(object);
+                object.connect = (...args) => {
+                    const id = connect(...args);
+                    this._mmGlobalSignals.push({ object, id });
+                    return id;
+                };
+            }
+
+            try {
+                callback();
+            } finally {
+                // Removes the own property again, restoring the prototype method.
+                for (const object of singletons)
+                    delete object.connect;
+            }
+        }
+
+        _mmDisconnectSingletonSignals() {
+            for (const { object, id } of this._mmGlobalSignals) {
+                try {
+                    object.disconnect(id);
+                } catch (_e) {
+                    // Already dropped (e.g. by a signal tracker).
+                }
+            }
+            this._mmGlobalSignals = [];
+        }
+
+        _mmDisconnectEventSourceSignals() {
+            const source = this._eventSource;
+            const ids = this._mmEventSourceIds ?? [];
+            this._mmEventSourceIds = [];
+
+            if (!source)
+                return;
+
+            for (const id of ids) {
+                try {
+                    source.disconnect(id);
+                } catch (_e) {
+                    // Source already disposed.
+                }
+            }
+        }
+
+        _setEventSource(eventSource) {
+            // Calendar.setEventSource() and EventsSection.setEventSource() connect
+            // to the source and throw the handler ids away. Once this button is
+            // destroyed those handlers keep firing on a live DBusEventSource and
+            // rebuild a disposed calendar, which is what floods the journal with
+            // "has been already disposed" plus "can't access property 'attach',
+            // layout is null" whenever the monitor layout changes.
+            this._mmDisconnectEventSourceSignals();
+
+            const ids = [];
+            const connect = eventSource.connect.bind(eventSource);
+            eventSource.connect = (...args) => {
+                const id = connect(...args);
+                ids.push(id);
+                return id;
+            };
+
+            try {
+                if (typeof super._setEventSource === 'function') {
+                    super._setEventSource(eventSource);
+                } else {
+                    // Fallback path (no upstream DateMenuButton to inherit from).
+                    this._eventSource?.destroy();
+                    this._calendar?.setEventSource(eventSource);
+                    this._eventsItem?.setEventSource(eventSource);
+                    this._eventSource = eventSource;
+                }
+            } finally {
+                delete eventSource.connect;
+            }
+
+            this._mmEventSourceIds = ids;
+        }
+
         _cleanupClock() {
             if (this._clockBinding) {
                 this._clockBinding.unbind();
@@ -814,34 +919,61 @@ var MultiMonitorsDateMenuButton = (() => {
             }
 
             if (this._clock) {
+                // On the upstream path the 'clock' -> label binding and the
+                // 'notify::timezone' handler are created inside super._init()
+                // without ids we can reach. Disposing our own WallClock drops
+                // both, so it stops writing into the disposed clock label every
+                // minute.
+                this._clock.run_dispose();
                 this._clock = null;
             }
         }
 
-        destroy() {
-            if (DateMenu.DateMenuButton) {
-                this._cleanupClock();
-                super.destroy();
-                this._clockDisplay = null;
-                this._panel = null;
+        _mmCleanup() {
+            if (this._mmCleanedUp)
                 return;
+            this._mmCleanedUp = true;
+
+            this._mmDisconnectEventSourceSignals();
+            const eventSource = this._eventSource;
+            this._eventSource = null;
+            if (eventSource) {
+                try {
+                    eventSource.destroy();
+                } catch (e) {
+                    console.error('[MultiMonitors] failed to destroy date menu event source:', e);
+                }
             }
 
-            if (this._sessionModeUpdatedId)
+            this._mmDisconnectSingletonSignals();
+
+            if (this._sessionModeUpdatedId && MainRef?.sessionMode) {
                 MainRef.sessionMode.disconnect(this._sessionModeUpdatedId);
+                this._sessionModeUpdatedId = null;
+            }
+
             this._cleanupClock();
 
-            // Clean up world clocks and weather if they were created
-            if (this._clocksItem) {
-                this._clocksItem.destroy();
-                this._clocksItem = null;
+            // The fallback path builds these itself; on the upstream path they are
+            // plain children and go away with the actor tree.
+            if (!DateMenu.DateMenuButton) {
+                if (this._clocksItem) {
+                    this._clocksItem.destroy();
+                    this._clocksItem = null;
+                }
+                if (this._weatherItem) {
+                    this._weatherItem.destroy();
+                    this._weatherItem = null;
+                }
             }
-            if (this._weatherItem) {
-                this._weatherItem.destroy();
-                this._weatherItem = null;
-            }
+        }
 
-            super.destroy();
+        _onDestroy() {
+            // PanelMenu.ButtonBox connects this to 'destroy', so it also runs when
+            // the panel is torn down from C on a monitor change — a destroy()
+            // override alone would be skipped there.
+            this._mmCleanup();
+            super._onDestroy();
             this._clockDisplay = null;
             this._panel = null;
         }
@@ -874,6 +1006,9 @@ var MultiMonitorsDateMenuButton = (() => {
 
         // Fallback methods if not copied from upstream
         _updateTimeZone() {
+            if (this._mmCleanedUp)
+                return;
+
             if (DateMenu.DateMenuButton && super._updateTimeZone)
                 return super._updateTimeZone();
 
@@ -883,6 +1018,9 @@ var MultiMonitorsDateMenuButton = (() => {
         }
 
         _sessionUpdated() {
+            if (this._mmCleanedUp)
+                return;
+
             if (DateMenu.DateMenuButton && super._sessionUpdated)
                 return super._sessionUpdated();
 
