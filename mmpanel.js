@@ -1078,6 +1078,12 @@ const MultiMonitorsPanel = GObject.registerClass(
                 return;
             }
 
+            // Queued callbacks can outlive the panel on monitor unplug, and
+            // _cleanup() nulls the settings it owns.
+            if (!this._settings) {
+                return;
+            }
+
             // Indicators that should NOT be mirrored (system/accessibility indicators and GNOME 46 phantom indicators)
             const excludedIndicators = [
                 'a11y',              // Accessibility menu
