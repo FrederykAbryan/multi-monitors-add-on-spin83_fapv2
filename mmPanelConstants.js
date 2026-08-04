@@ -33,12 +33,47 @@ export function setMMPanelArrayRef(mmPanelArray) {
 	_mmPanelArrayRef = mmPanelArray;
 }
 
+// Panels that registered themselves at construction. _pushPanel() adds panels
+// to whichever array the reference happens to point at, which has proven
+// unreliable at session start: the panels exist and render while the shared
+// array stays empty, so StatusIndicatorsController._findPanel() finds nothing
+// and every indicator transfer silently no-ops. Self-registration does not
+// depend on the reference being set first.
+const _registeredPanels = [];
+
+export function registerMMPanel(panel) {
+	if (!_registeredPanels.includes(panel))
+		_registeredPanels.push(panel);
+
+	// Keep the shared array in step when it is available, so callers reading it
+	// directly see the panel too.
+	if (_mmPanelArrayRef && !_mmPanelArrayRef.includes(panel))
+		_mmPanelArrayRef.push(panel);
+}
+
+export function unregisterMMPanel(panel) {
+	const localIndex = _registeredPanels.indexOf(panel);
+	if (localIndex >= 0)
+		_registeredPanels.splice(localIndex, 1);
+
+	if (_mmPanelArrayRef) {
+		const sharedIndex = _mmPanelArrayRef.indexOf(panel);
+		if (sharedIndex >= 0)
+			_mmPanelArrayRef.splice(sharedIndex, 1);
+	}
+}
+
 // Helper function to safely access mmPanel array
 export function getMMPanelArray() {
 	// First try Main.mmPanel if it exists
 	if ('mmPanel' in Main && Main.mmPanel) {
 		return Main.mmPanel;
 	}
-	// Fall back to stored reference
-	return _mmPanelArrayRef;
+	// Then the reference set by extension.js, but only when it actually holds
+	// panels - an empty one means registration went astray.
+	if (_mmPanelArrayRef && _mmPanelArrayRef.length > 0) {
+		return _mmPanelArrayRef;
+	}
+	// Fall back to panels that registered themselves.
+	return _registeredPanels;
 }

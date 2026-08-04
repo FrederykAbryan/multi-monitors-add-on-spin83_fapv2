@@ -338,6 +338,10 @@ const MultiMonitorsPanel = GObject.registerClass(
             this.monitorIndex = monitorIndex;
             this._settings = settings;
 
+            // Register before anything else can fail: _findPanel() depends on
+            // this to route indicator transfers to the right panel.
+            Constants.registerMMPanel(this);
+
             this._destroyed = false;
             // Cleanup MUST run from the `destroy` SIGNAL, not only the destroy()
             // method. On resume from sleep a monitor can disappear and mutter
@@ -528,6 +532,8 @@ const MultiMonitorsPanel = GObject.registerClass(
         _cleanup() {
             if (this._destroyed)
                 return;
+
+            Constants.unregisterMMPanel(this);
             this._destroyed = true;
 
             // Clean up extension watcher
