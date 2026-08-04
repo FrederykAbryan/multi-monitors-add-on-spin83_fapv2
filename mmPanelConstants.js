@@ -28,11 +28,6 @@ export const EXCLUDE_INDICATORS_ID = 'exclude-indicators';
 // Store reference to mmPanel array set by extension.js
 let _mmPanelArrayRef = null;
 
-// Helper function to set the mmPanel reference
-export function setMMPanelArrayRef(mmPanelArray) {
-	_mmPanelArrayRef = mmPanelArray;
-}
-
 // Panels that registered themselves at construction. _pushPanel() adds panels
 // to whichever array the reference happens to point at, which has proven
 // unreliable at session start: the panels exist and render while the shared
@@ -40,6 +35,24 @@ export function setMMPanelArrayRef(mmPanelArray) {
 // and every indicator transfer silently no-ops. Self-registration does not
 // depend on the reference being set first.
 const _registeredPanels = [];
+
+// Helper function to set the mmPanel reference
+export function setMMPanelArrayRef(mmPanelArray) {
+	_mmPanelArrayRef = mmPanelArray;
+
+	// enable() clears the shared array immediately before setting the
+	// reference, so any panel registered before that point would be dropped
+	// from it. Backfill, or callers that read the array directly - the
+	// Blur my Shell registration and the relayout loop in mmlayout - see no
+	// panels even though they exist.
+	if (!_mmPanelArrayRef)
+		return;
+
+	for (const panel of _registeredPanels) {
+		if (!_mmPanelArrayRef.includes(panel))
+			_mmPanelArrayRef.push(panel);
+	}
+}
 
 export function registerMMPanel(panel) {
 	if (!_registeredPanels.includes(panel))
