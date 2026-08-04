@@ -1175,6 +1175,26 @@ const MultiMonitorsPanel = GObject.registerClass(
                 this._removeRole(rightIndicators, 'activities');
             }
 
+            // The per-button settings are authoritative for these roles, so the
+            // clone pass has to honour them as well. Otherwise any re-clone -
+            // and one runs whenever *another* extension is enabled or disabled -
+            // rebuilds a button the user switched off, and nothing puts it back
+            // until the setting is toggled again.
+            const legacyRoleSettings = {
+                'activities': SHOW_ACTIVITIES_ID,
+                'appMenu': SHOW_APP_MENU_ID,
+                'dateMenu': SHOW_DATE_TIME_ID,
+            };
+            for (const [legacyRole, settingKey] of Object.entries(legacyRoleSettings)) {
+                if (this._settings.get_boolean(settingKey))
+                    continue;
+
+                this._removeRole(leftIndicators, legacyRole);
+                this._removeRole(centerIndicators, legacyRole);
+                this._removeRole(rightIndicators, legacyRole);
+            }
+
+
             // Now mirror them in order
             const desiredRoles = new Set([...leftIndicators, ...centerIndicators, ...rightIndicators]);
             this._removeStaleIndicators(desiredRoles);
