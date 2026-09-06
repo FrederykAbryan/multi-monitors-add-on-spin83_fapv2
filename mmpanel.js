@@ -15,6 +15,7 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, visit https://www.gnu.org/licenses/.
 */
 
+import { cleanupSafely } from './actorLifecycle.js';
 import St from 'gi://St';
 import Shell from 'gi://Shell';
 import Meta from 'gi://Meta';
@@ -461,9 +462,9 @@ const MultiMonitorsPanel = GObject.registerClass(
 
             for (const delay of delays) {
                 const timeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
-                    this._updatePanel();
-                    const idx = this._initialCheckTimeouts.indexOf(timeoutId);
+                    const idx = this._initialCheckTimeouts?.indexOf(timeoutId) ?? -1;
                     if (idx >= 0) this._initialCheckTimeouts.splice(idx, 1);
+                    this._updatePanel();
                     return GLib.SOURCE_REMOVE;
                 });
                 this._initialCheckTimeouts.push(timeoutId);
@@ -494,6 +495,9 @@ const MultiMonitorsPanel = GObject.registerClass(
                     continue;
 
                 this._primaryPanelBoxes.push(box);
+                box.connectObject('destroy', () => {
+                    this._primaryPanelBoxes = this._primaryPanelBoxes.filter(actor => actor !== box);
+                }, this);
                 for (const signal of signals) {
                     try {
                         box.connectObject(signal, scheduleUpdate, this);
@@ -505,6 +509,8 @@ const MultiMonitorsPanel = GObject.registerClass(
         }
 
         _schedulePanelRefresh(delays) {
+            if (this._destroyed)
+                return;
             for (const timeoutId of this._panelRefreshTimeouts)
                 GLib.source_remove(timeoutId);
             this._panelRefreshTimeouts = [];
@@ -532,14 +538,14 @@ const MultiMonitorsPanel = GObject.registerClass(
 
             // Clean up extension watcher
             if (this._extensionStateChangedId) {
-                Main.extensionManager.disconnect(this._extensionStateChangedId);
+                cleanupSafely(() => Main.extensionManager.disconnect(this._extensionStateChangedId));
                 this._extensionStateChangedId = null;
             }
             // Handlers were connected with connectObject(this); auto-disconnect
             // on destroy covers it, but disconnect explicitly for completeness.
             if (this._primaryPanelBoxes) {
                 for (const box of this._primaryPanelBoxes) {
-                    box.disconnectObject(this);
+                    cleanupSafely(() => box.disconnectObject(this));
                 }
                 this._primaryPanelBoxes = [];
             }
@@ -556,43 +562,43 @@ const MultiMonitorsPanel = GObject.registerClass(
             }
 
             if (this._clickGestureRecognizeId && this._clickGesture) {
-                this._clickGesture.disconnect(this._clickGestureRecognizeId);
+                cleanupSafely(() => this._clickGesture.disconnect(this._clickGestureRecognizeId));
                 this._clickGestureRecognizeId = null;
             }
 
             if (this._workareasChangedId) {
-                global.display.disconnect(this._workareasChangedId);
+                cleanupSafely(() => global.display.disconnect(this._workareasChangedId));
                 this._workareasChangedId = null;
             }
             if (this._showingId) {
-                Main.overview.disconnect(this._showingId);
+                cleanupSafely(() => Main.overview.disconnect(this._showingId));
                 this._showingId = null;
             }
             if (this._hidingId) {
-                Main.overview.disconnect(this._hidingId);
+                cleanupSafely(() => Main.overview.disconnect(this._hidingId));
                 this._hidingId = null;
             }
             if (this._showActivitiesId) {
-                this._settings.disconnect(this._showActivitiesId);
+                cleanupSafely(() => this._settings.disconnect(this._showActivitiesId));
                 this._showActivitiesId = null;
             }
             if (this._showAppMenuId) {
-                this._settings.disconnect(this._showAppMenuId);
+                cleanupSafely(() => this._settings.disconnect(this._showAppMenuId));
                 this._showAppMenuId = null;
             }
             if (this._showDateTimeId) {
-                this._settings.disconnect(this._showDateTimeId);
+                cleanupSafely(() => this._settings.disconnect(this._showDateTimeId));
                 this._showDateTimeId = null;
             }
             if (this._panelColorId) {
-                this._settings.disconnect(this._panelColorId);
+                cleanupSafely(() => this._settings.disconnect(this._panelColorId));
                 this._panelColorId = null;
             }
 
-            Main.ctrlAltTabManager.removeGroup(this);
+            cleanupSafely(() => Main.ctrlAltTabManager.removeGroup(this));
 
             if (this._updatedId) {
-                Main.sessionMode.disconnect(this._updatedId);
+                cleanupSafely(() => Main.sessionMode.disconnect(this._updatedId));
                 this._updatedId = null;
             }
 
@@ -601,9 +607,16 @@ const MultiMonitorsPanel = GObject.registerClass(
             }
             this.statusArea = {};
             this._settings = null;
+            this._leftBox = null;
+            this._centerBox = null;
+            this._centerBin = null;
+            this._rightBox = null;
+            this._clickGesture = null;
         }
 
         destroy() {
+            if (this._destroyed)
+                return;
             this._cleanup();
             super.destroy();
         }
@@ -683,6 +696,8 @@ const MultiMonitorsPanel = GObject.registerClass(
         }
 
         vfunc_allocate(box) {
+            if (this._destroyed)
+                return;
             this.set_allocation(box);
 
             const themeNode = this.get_theme_node();
@@ -759,12 +774,12 @@ const MultiMonitorsPanel = GObject.registerClass(
                 return;
 
             if (indicator._mmDestroyId) {
-                indicator.disconnect(indicator._mmDestroyId);
+                cleanupSafely(() => indicator.disconnect(indicator._mmDestroyId));
                 indicator._mmDestroyId = 0;
             }
 
             if (indicator._mmMenuSetId) {
-                indicator.disconnect(indicator._mmMenuSetId);
+                cleanupSafely(() => indicator.disconnect(indicator._mmMenuSetId));
                 indicator._mmMenuSetId = 0;
             }
         }
@@ -774,12 +789,13 @@ const MultiMonitorsPanel = GObject.registerClass(
             if (!indicator)
                 return;
 
-            if (indicator.menu)
-                this.menuManager.removeMenu(indicator.menu);
-
-            this._disconnectIndicatorSignals(indicator);
-            indicator.destroy();
             delete this.statusArea[role];
+            cleanupSafely(() => {
+                if (indicator.menu)
+                    this.menuManager.removeMenu(indicator.menu);
+            });
+            this._disconnectIndicatorSignals(indicator);
+            cleanupSafely(() => indicator.destroy());
         }
 
         _ensureIndicator(role) {
@@ -1102,16 +1118,20 @@ const MultiMonitorsPanel = GObject.registerClass(
                         continue;
                     }
 
-                    const container = indicator.container || indicator;
+                    try {
+                        const container = indicator.container || indicator;
 
-                    // Match direct ownership and wrapped/containerized indicators.
-                    // Some tray providers insert wrappers around the real container,
-                    // so strict equality misses them and causes skipped mirrors.
-                    if (indicator === child ||
-                        container === child ||
-                        (child.contains && child.contains(container)) ||
-                        (container.contains && container.contains(child))) {
-                        return role;
+                        // Match direct ownership and wrapped/containerized indicators.
+                        // Some tray providers insert wrappers around the real container,
+                        // so strict equality misses them and causes skipped mirrors.
+                        if (indicator === child ||
+                            container === child ||
+                            (child.contains && child.contains(container)) ||
+                            (container.contains && container.contains(child))) {
+                            return role;
+                        }
+                    } catch (_error) {
+                        // A tray provider may still expose a disposed indicator.
                     }
                 }
                 return null;
@@ -1119,7 +1139,8 @@ const MultiMonitorsPanel = GObject.registerClass(
 
             // Scan each box in main panel to preserve order
             if (mainPanel._leftBox) {
-                const children = mainPanel._leftBox.get_children();
+                let children = [];
+                cleanupSafely(() => { children = mainPanel._leftBox.get_children(); });
                 for (let child of children) {
                     if (!child.visible) {
                         continue;
@@ -1133,7 +1154,8 @@ const MultiMonitorsPanel = GObject.registerClass(
             }
 
             if (mainPanel._centerBox) {
-                const children = mainPanel._centerBox.get_children();
+                let children = [];
+                cleanupSafely(() => { children = mainPanel._centerBox.get_children(); });
                 for (let child of children) {
                     if (!child.visible) {
                         continue;
@@ -1147,7 +1169,8 @@ const MultiMonitorsPanel = GObject.registerClass(
             }
 
             if (mainPanel._rightBox) {
-                const children = mainPanel._rightBox.get_children();
+                let children = [];
+                cleanupSafely(() => { children = mainPanel._rightBox.get_children(); });
                 for (let child of children) {
                     if (!child.visible) {
                         continue;
@@ -1222,7 +1245,7 @@ const MultiMonitorsPanel = GObject.registerClass(
         }
 
         _updateBox(elements, box) {
-            if (!elements) {
+            if (this._destroyed || !elements || !box) {
                 return;
             }
 

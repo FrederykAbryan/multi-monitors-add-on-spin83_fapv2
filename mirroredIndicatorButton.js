@@ -15,6 +15,8 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, visit https://www.gnu.org/licenses/.
 */
 
+import { cleanupSafely } from './actorLifecycle.js';
+import { retainAstraSourceHeight } from './astraSourceGeometry.js';
 import St from 'gi://St';
 import Atk from 'gi://Atk';
 import Clutter from 'gi://Clutter';
@@ -95,12 +97,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
             // source indicator's real menu. We never use the default menu.
             super._init(0.0, null, true);
 
-            // Cleanup runs from the `destroy` SIGNAL only. When a parent panel
-            // is destroyed from C code (e.g. a monitor disappears on resume),
-            // Clutter destroys children without calling our JS destroy()
-            // override, but the `destroy` signal still fires. super.destroy()
-            // (explicit path) also emits this signal, so _cleanup runs exactly
-            // once in both cases — no guard flag needed.
+            // Parent-driven C destruction also needs to cancel external work.
+            this._destroyed = false;
             this.connect('destroy', () => this._cleanup());
 
             this._role = role;
@@ -165,8 +163,8 @@ export const MirroredIndicatorButton = GObject.registerClass(
             if (!this._workspaceDotsBox || !this._workspaceManager)
                 return;
 
-            // Remove existing dots
-            this._workspaceDotsBox.remove_all_children();
+            // These dots are replaced, so dispose them before releasing ownership.
+            this._workspaceDotsBox.destroy_all_children();
 
             const nWorkspaces = this._workspaceManager.n_workspaces;
             const activeIndex = this._workspaceManager.get_active_workspace_index();
@@ -189,6 +187,12 @@ export const MirroredIndicatorButton = GObject.registerClass(
             this._isEmpty = false;
 
             if (this._sourceIndicator) {
+                this._sourceDestroyId = this._sourceIndicator.connect('destroy', () => {
+                    this._sourceDestroyId = 0;
+                    // Tear down while the source still exists, before its children
+                    // and clones are disposed by Clutter.
+                    this.destroy();
+                });
                 // Check if the source indicator has any visible content
                 const sourceChild = this._sourceIndicator.get_first_child();
                 if (!sourceChild) {
@@ -253,6 +257,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
             watch(this._sourceIndicator, 'notify::allocation');
 
             const sourceChild = this._sourceIndicator?.get_first_child();
+            this._sourcePresenceChild = sourceChild;
             watch(sourceChild, 'notify::visible');
             watch(sourceChild, 'notify::mapped');
             watch(sourceChild, 'notify::allocation');
@@ -265,7 +270,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
         _syncMirrorPresence() {
             // After cleanup, _sourceIndicator is null. Bail without touching
             // this actor — setting properties on a disposed GObject throws.
-            if (!this._sourceIndicator)
+            if (this._destroyed || !this._sourceIndicator)
                 return;
 
             const sourceChild = this._sourceIndicator.get_first_child();
@@ -558,7 +563,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
         }
 
         _rebuildWorkspaceIndicatorMode() {
-            if (!this._sourceIndicator)
+            if (this._destroyed || !this._sourceIndicator)
                 return;
 
             const sourceChild = this._sourceIndicator.get_first_child();
@@ -685,7 +690,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 return;
 
             for (const { object, id } of this._workspacePreviewWindowSignalIds)
-                object.disconnect(id);
+                cleanupSafely(() => object.disconnect(id));
 
             this._workspacePreviewWindowSignalIds = [];
         }
@@ -706,7 +711,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 return;
 
             this._disconnectWorkspaceWindowSignals();
-            this._workspacePreviewBox.remove_all_children();
+            this._workspacePreviewBox.destroy_all_children();
             this._workspacePreviewButtons = [];
 
             const workspaceManager = global.workspace_manager;
@@ -830,7 +835,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
 
         _disconnectMirroredClockDisplay() {
             if (this._clockBinding) {
-                this._clockBinding.unbind();
+                cleanupSafely(() => this._clockBinding.unbind());
                 this._clockBinding = null;
             }
 
@@ -841,7 +846,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
         _disconnectLabelCopyBindings() {
             if (this._labelCopyBindings) {
                 for (const binding of this._labelCopyBindings)
-                    binding.unbind();
+                    cleanupSafely(() => binding.unbind());
             }
 
             this._labelCopyBindings = [];
@@ -910,7 +915,23 @@ export const MirroredIndicatorButton = GObject.registerClass(
             }
         }
 
-        _createAllocationMatchedClone(parent, source) {
+        _createAllocationMatchedClone(parent, source, preserveHiddenSize = false) {
+            if (preserveHiddenSize) {
+                const release = retainAstraSourceHeight(source, Main.layoutManager.panelBox, () => {
+                    // Enabling while already fullscreen has no visible sample.
+                    // Use the primary panel height minus the source parent's
+                    // theme padding, matching its normal panel allocation.
+                    const sourceParent = source.get_parent();
+                    const box = new Clutter.ActorBox({
+                        x1: 0, y1: 0,
+                        x2: sourceParent.width,
+                        y2: Main.panel.height,
+                    });
+                    return sourceParent.get_theme_node().get_content_box(box).get_height();
+                });
+                this._astraSourceSizeReleases ??= [];
+                this._astraSourceSizeReleases.push(release);
+            }
             const wrapper = new St.Widget({
                 layout_manager: new Clutter.BinLayout(),
                 x_align: Clutter.ActorAlign.CENTER,
@@ -980,7 +1001,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
             const children = source.get_children ? source.get_children() : [];
             if (children.length === 0) {
                 // Base clone fallback if structure not as expected
-                this._createSimpleClone(root, source);
+                this._createAllocationMatchedClone(root, source, true);
                 this.add_child(root);
                 return;
             }
@@ -1022,12 +1043,10 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 // panel-button hover background, so Clutter.Clone doesn't bleed the
                 // source's :hover visual to the extended monitor.
                 const cloneSource = child.box || child;
-                const clone = new Clutter.Clone({
-                    source: cloneSource,
-                    x_align: Clutter.ActorAlign.FILL,
-                    y_align: Clutter.ActorAlign.FILL
-                });
-                proxy.add_child(clone);
+                // Keep the content at its source allocation when the primary
+                // panel is hidden by fullscreen. Filling the proxy would scale
+                // icons and graphs to the secondary panel's available space.
+                this._createAllocationMatchedClone(proxy, cloneSource, true);
 
                 // Pipe component-specific interactions
                 this._setupAstraProxyEvents(proxy, child);
@@ -1571,12 +1590,12 @@ export const MirroredIndicatorButton = GObject.registerClass(
 
         _disconnectIconSyncSource() {
             if (this._iconContainerDestroyId && this._iconContainer) {
-                this._iconContainer.disconnect(this._iconContainerDestroyId);
+                cleanupSafely(() => this._iconContainer.disconnect(this._iconContainerDestroyId));
                 this._iconContainerDestroyId = 0;
             }
 
             if (this._iconSourceDestroyId && this._iconSource) {
-                this._iconSource.disconnect(this._iconSourceDestroyId);
+                cleanupSafely(() => this._iconSource.disconnect(this._iconSourceDestroyId));
                 this._iconSourceDestroyId = 0;
             }
 
@@ -1589,8 +1608,9 @@ export const MirroredIndicatorButton = GObject.registerClass(
             // they target are removed/disposed below.
             this._disconnectLabelCopyBindings();
 
-            // Remove existing children
-            container.remove_all_children();
+            // Replaced copies must be destroyed explicitly. Merely unparenting
+            // them defers destruction to GC, where GJS cannot run destroy handlers.
+            container.destroy_all_children();
 
             if (this._isClipboardIndicator()) {
                 this._copyClipboardIconFromSource(container, source);
@@ -3178,6 +3198,9 @@ export const MirroredIndicatorButton = GObject.registerClass(
         }
 
         _cleanup() {
+            if (this._destroyed)
+                return;
+            this._destroyed = true;
             this._disconnectMirroredClockDisplay();
             this._disconnectLabelCopyBindings();
             this._disconnectIconSyncSource();
@@ -3212,7 +3235,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 this._clipboardSourceRestoreId = null;
             }
             if (this._clipboardPendingSourceRestore) {
-                this._clipboardPendingSourceRestore();
+                cleanupSafely(() => this._clipboardPendingSourceRestore());
                 this._clipboardPendingSourceRestore = null;
             }
 
@@ -3242,7 +3265,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
             }
 
             if (this._quickSettingsPrimeRestore) {
-                this._quickSettingsPrimeRestore();
+                cleanupSafely(() => this._quickSettingsPrimeRestore());
                 this._quickSettingsPrimeRestore = null;
             }
 
@@ -3251,7 +3274,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 this._quickSettingsMenuRestoreId = 0;
             }
             if (this._quickSettingsMenuPendingRestore) {
-                this._quickSettingsMenuPendingRestore();
+                cleanupSafely(() => this._quickSettingsMenuPendingRestore());
                 this._quickSettingsMenuPendingRestore = null;
             }
 
@@ -3260,7 +3283,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 this._astraMenuRestoreId = 0;
             }
             if (this._astraMenuPendingRestore) {
-                this._astraMenuPendingRestore();
+                cleanupSafely(() => this._astraMenuPendingRestore());
                 this._astraMenuPendingRestore = null;
             }
 
@@ -3269,22 +3292,22 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 this._genericMenuRestoreId = 0;
             }
             if (this._genericMenuPendingRestore) {
-                this._genericMenuPendingRestore();
+                cleanupSafely(() => this._genericMenuPendingRestore());
                 this._genericMenuPendingRestore = null;
             }
 
             if (this._overviewShowingId) {
-                Main.overview.disconnect(this._overviewShowingId);
+                cleanupSafely(() => Main.overview.disconnect(this._overviewShowingId));
                 this._overviewShowingId = null;
             }
 
             if (this._fullscreenChangedId) {
-                global.display.disconnect(this._fullscreenChangedId);
+                cleanupSafely(() => global.display.disconnect(this._fullscreenChangedId));
                 this._fullscreenChangedId = null;
             }
 
             if (this._sourceSizeChangedId && this._quickSettingsSource) {
-                this._quickSettingsSource.disconnect(this._sourceSizeChangedId);
+                cleanupSafely(() => this._quickSettingsSource.disconnect(this._sourceSizeChangedId));
                 this._sourceSizeChangedId = null;
             }
 
@@ -3299,18 +3322,18 @@ export const MirroredIndicatorButton = GObject.registerClass(
             }
 
             if (this._workspaceIndicatorModeWatchSource && this._workspaceIndicatorModeWatchId) {
-                this._workspaceIndicatorModeWatchSource.disconnect(this._workspaceIndicatorModeWatchId);
+                cleanupSafely(() => this._workspaceIndicatorModeWatchSource.disconnect(this._workspaceIndicatorModeWatchId));
                 this._workspaceIndicatorModeWatchSource = null;
                 this._workspaceIndicatorModeWatchId = 0;
             }
 
             if (this._workspaceSourceMenuRegistered) {
-                this._panel?.menuManager?.removeMenu(this._workspaceSourceMenuRegistered);
+                cleanupSafely(() => this._panel?.menuManager?.removeMenu(this._workspaceSourceMenuRegistered));
                 this._workspaceSourceMenuRegistered = null;
             }
 
             if (this._workspaceNameLabelChangedId) {
-                this._sourceIndicator?.menu?.disconnect(this._workspaceNameLabelChangedId);
+                cleanupSafely(() => this._sourceIndicator?.menu?.disconnect(this._workspaceNameLabelChangedId));
                 this._workspaceNameLabelChangedId = 0;
             }
             this._workspaceNameLabel = null;
@@ -3321,7 +3344,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
                 this._workspaceMenuRestoreId = 0;
             }
             if (this._workspaceMenuPendingRestore) {
-                this._workspaceMenuPendingRestore();
+                cleanupSafely(() => this._workspaceMenuPendingRestore());
                 this._workspaceMenuPendingRestore = null;
             }
 
@@ -3332,7 +3355,7 @@ export const MirroredIndicatorButton = GObject.registerClass(
 
             if (this._workspacePreviewSignalIds) {
                 for (const { object, id } of this._workspacePreviewSignalIds) {
-                    object.disconnect(id);
+                    cleanupSafely(() => object.disconnect(id));
                 }
                 this._workspacePreviewSignalIds = null;
             }
@@ -3348,47 +3371,56 @@ export const MirroredIndicatorButton = GObject.registerClass(
 
             if (this._allocationCloneSignals) {
                 for (const signal of this._allocationCloneSignals) {
-                    signal.source.disconnect(signal.id);
+                    cleanupSafely(() => signal.source.disconnect(signal.id));
                 }
                 this._allocationCloneSignals = null;
             }
 
+            for (const release of this._astraSourceSizeReleases ?? [])
+                cleanupSafely(release);
+            this._astraSourceSizeReleases = null;
+
             // Source-presence handlers were connected with connectObject(this);
             // GJS auto-disconnects them on destroy, but disconnect explicitly
             // for the non-destroy cleanup path too.
-            this._sourceIndicator?.disconnectObject(this);
-            this._sourceIndicator?.get_first_child()?.disconnectObject(this);
+            cleanupSafely(() => this._sourceIndicator?.disconnectObject(this));
+            cleanupSafely(() => this._sourcePresenceChild?.disconnectObject(this));
+            this._sourcePresenceChild = null;
             this._sourcePresenceWatched = false;
 
             if (this._role === 'activities') {
                 if (this._showingId) {
-                    Main.overview.disconnect(this._showingId);
+                    cleanupSafely(() => Main.overview.disconnect(this._showingId));
                     this._showingId = null;
                 }
                 if (this._hidingId) {
-                    Main.overview.disconnect(this._hidingId);
+                    cleanupSafely(() => Main.overview.disconnect(this._hidingId));
                     this._hidingId = null;
                 }
                 if (this._activeWsChangedId) {
-                    this._workspaceManager.disconnect(this._activeWsChangedId);
+                    cleanupSafely(() => this._workspaceManager.disconnect(this._activeWsChangedId));
                     this._activeWsChangedId = null;
                 }
                 if (this._nWorkspacesChangedId) {
-                    this._workspaceManager.disconnect(this._nWorkspacesChangedId);
+                    cleanupSafely(() => this._workspaceManager.disconnect(this._nWorkspacesChangedId));
                     this._nWorkspacesChangedId = null;
                 }
             }
 
+            if (this._sourceDestroyId)
+                cleanupSafely(() => this._sourceIndicator?.disconnect(this._sourceDestroyId));
+            this._sourceDestroyId = 0;
+            this._quickSettingsSource = null;
+            this._quickSettingsClone = null;
             this._sourceIndicator = null;
             this._panel = null;
             this._workspaceManager = null;
         }
 
         destroy() {
-            // super.destroy() emits the `destroy` signal, which runs _cleanup.
-            // This keeps a single cleanup path for both explicit destroy()
-            // and C-side destruction (monitor gone on resume), so no guard
-            // flag is needed.
+            if (this._destroyed)
+                return;
+            this._cleanup();
             super.destroy();
         }
     });
