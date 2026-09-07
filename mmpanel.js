@@ -339,6 +339,10 @@ const MultiMonitorsPanel = GObject.registerClass(
             this.monitorIndex = monitorIndex;
             this._settings = settings;
 
+            // Register before anything else can fail: _findPanel() depends on
+            // this to route indicator transfers to the right panel.
+            Constants.registerMMPanel(this);
+
             this._destroyed = false;
             // Cleanup MUST run from the `destroy` SIGNAL, not only the destroy()
             // method. On resume from sleep a monitor can disappear and mutter
@@ -534,6 +538,8 @@ const MultiMonitorsPanel = GObject.registerClass(
         _cleanup() {
             if (this._destroyed)
                 return;
+
+            Constants.unregisterMMPanel(this);
             this._destroyed = true;
 
             // Clean up extension watcher
@@ -1088,6 +1094,12 @@ const MultiMonitorsPanel = GObject.registerClass(
                 return;
             }
 
+            // Queued callbacks can outlive the panel on monitor unplug, and
+            // _cleanup() nulls the settings it owns.
+            if (!this._settings) {
+                return;
+            }
+
             // Indicators that should NOT be mirrored (system/accessibility indicators and GNOME 46 phantom indicators)
             const excludedIndicators = [
                 'a11y',              // Accessibility menu
@@ -1191,6 +1203,26 @@ const MultiMonitorsPanel = GObject.registerClass(
                 this._removeRole(centerIndicators, 'activities');
                 this._removeRole(rightIndicators, 'activities');
             }
+
+            // The per-button settings are authoritative for these roles, so the
+            // clone pass has to honour them as well. Otherwise any re-clone -
+            // and one runs whenever *another* extension is enabled or disabled -
+            // rebuilds a button the user switched off, and nothing puts it back
+            // until the setting is toggled again.
+            const legacyRoleSettings = {
+                'activities': SHOW_ACTIVITIES_ID,
+                'appMenu': SHOW_APP_MENU_ID,
+                'dateMenu': SHOW_DATE_TIME_ID,
+            };
+            for (const [legacyRole, settingKey] of Object.entries(legacyRoleSettings)) {
+                if (this._settings.get_boolean(settingKey))
+                    continue;
+
+                this._removeRole(leftIndicators, legacyRole);
+                this._removeRole(centerIndicators, legacyRole);
+                this._removeRole(rightIndicators, legacyRole);
+            }
+
 
             // Now mirror them in order
             const desiredRoles = new Set([...leftIndicators, ...centerIndicators, ...rightIndicators]);
