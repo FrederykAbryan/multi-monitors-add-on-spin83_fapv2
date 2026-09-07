@@ -113,3 +113,52 @@ for (let i = 0; i < 20; i++) {
 refresh._disconnectLabelCopyBindings();
 container.destroy_all_children();
 console.log('Actor lifecycle regression checks passed (including 20 label refreshes)');
+
+const dateMenu = methods('mmcalendar.js', 'MultiMonitorsDateMenuButton', [
+    '_mmTrackClockConnections', '_cleanupClock',
+]);
+class Clock {
+    signals = new Map();
+    binding = null;
+    connect(name, callback) {
+        const id = this.signals.size + 1;
+        this.signals.set(id, callback);
+        return id;
+    }
+    disconnect(id) { assert.ok(this.signals.delete(id)); }
+    bind_property() {
+        this.binding = { unbind: () => { this.binding = null; } };
+        return this.binding;
+    }
+}
+for (let i = 0; i < 20; i++) {
+    const clock = new Clock();
+    dateMenu._mmTrackClockConnections(() => {
+        dateMenu._clock = clock;
+        clock.bind_property('clock', {}, 'text', 1);
+        clock.connect('notify::timezone', () => assert.fail('retired callback'));
+    });
+    assert.equal(Object.hasOwn(clock, 'connect'), false);
+    assert.equal(Object.hasOwn(clock, 'bind_property'), false);
+    dateMenu._cleanupClock();
+    assert.equal(clock.binding, null);
+    assert.equal(clock.signals.size, 0);
+    assert.equal(dateMenu._clock, null);
+    dateMenu._cleanupClock();
+}
+const fallbackClock = new Clock();
+dateMenu._clock = fallbackClock;
+dateMenu._clockBinding = fallbackClock.bind_property();
+dateMenu._clockNotifyTimezoneId = fallbackClock.connect('notify::timezone', () => {});
+dateMenu._cleanupClock();
+assert.equal(fallbackClock.signals.size, 0);
+assert.equal(fallbackClock.binding, null);
+const failedClock = new Clock();
+assert.throws(() => dateMenu._mmTrackClockConnections(() => {
+    dateMenu._clock = failedClock;
+    throw Error('initialization failed');
+}), /initialization failed/);
+assert.equal(Object.hasOwn(failedClock, 'connect'), false);
+assert.equal(Object.hasOwn(failedClock, 'bind_property'), false);
+dateMenu._cleanupClock();
+console.log('Date menu clock cleanup checks passed (upstream, fallback, and failed initialization)');

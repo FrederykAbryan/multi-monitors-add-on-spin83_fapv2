@@ -619,7 +619,8 @@ var MultiMonitorsDateMenuButton = (() => {
             this._mmEventSourceIds = [];
 
             if (DateMenu.DateMenuButton) {
-                this._mmTrackSingletonSignals(() => super._init());
+                this._mmTrackClockConnections(() =>
+                    this._mmTrackSingletonSignals(() => super._init()));
                 this._panel = panel;
                 this._syncMultiMonitorPanelStyle();
                 return;
@@ -907,6 +908,43 @@ var MultiMonitorsDateMenuButton = (() => {
             this._mmEventSourceIds = ids;
         }
 
+        _mmTrackClockConnections(callback) {
+            // Capture connections on this menu's clock while upstream builds it.
+            // Only this instance is wrapped; the primary panel clock is untouched.
+            let clock = null;
+            Object.defineProperty(this, '_clock', {
+                configurable: true,
+                get: () => clock,
+                set: value => {
+                    clock = value;
+                    const bindProperty = clock.bind_property.bind(clock);
+                    const connect = clock.connect.bind(clock);
+                    clock.bind_property = (...args) => {
+                        const binding = bindProperty(...args);
+                        this._clockBinding = binding;
+                        return binding;
+                    };
+                    clock.connect = (...args) => {
+                        const id = connect(...args);
+                        this._mmClockSignalIds.push(id);
+                        return id;
+                    };
+                },
+            });
+            this._mmClockSignalIds = [];
+            try {
+                callback();
+            } finally {
+                if (clock) {
+                    delete clock.bind_property;
+                    delete clock.connect;
+                }
+                Object.defineProperty(this, '_clock', {
+                    configurable: true, enumerable: true, writable: true, value: clock,
+                });
+            }
+        }
+
         _cleanupClock() {
             if (this._clockBinding) {
                 this._clockBinding.unbind();
@@ -918,15 +956,10 @@ var MultiMonitorsDateMenuButton = (() => {
                 this._clockNotifyTimezoneId = 0;
             }
 
-            if (this._clock) {
-                // On the upstream path the 'clock' -> label binding and the
-                // 'notify::timezone' handler are created inside super._init()
-                // without ids we can reach. Disposing our own WallClock drops
-                // both, so it stops writing into the disposed clock label every
-                // minute.
-                this._clock.run_dispose();
-                this._clock = null;
-            }
+            for (const id of this._mmClockSignalIds ?? [])
+                this._clock.disconnect(id);
+            this._mmClockSignalIds = [];
+            this._clock = null;
         }
 
         _mmCleanup() {

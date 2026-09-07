@@ -669,6 +669,8 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             //this._thumbnailsSelectSideId = this._settings.connect('changed::'+THUMBNAILS_SLIDER_POSITION_ID,
             //                                                this._thumbnailsSelectSide.bind(this));
             Main.layoutManager.connectObject('monitors-changed', this._monitorsChanged.bind(this), this);
+            Shell.AppSystem.get_default().connectObject(
+                'installed-changed', this._onInstalledAppsChanged.bind(this), this);
         }
 
         _getSearchTextFromActor(actor) {
@@ -756,6 +758,15 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             }
         }
 
+        _onInstalledAppsChanged() {
+            if (this._destroying)
+                return;
+
+            this._populateAppGrid();
+            // Reapply the current query, including keyboard focus, while open.
+            return this._syncAppGridState();
+        }
+
         _populateAppGrid() {
             // Get all installed applications
             const appSystem = Shell.AppSystem.get_default();
@@ -768,15 +779,18 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             // Sort alphabetically
             apps.sort((a, b) => a.get_name().localeCompare(b.get_name()));
 
-            // Create app icons (limit to reasonable number for performance)
-            const maxApps = 100;
-            for (let i = 0; i < Math.min(apps.length, maxApps); i++) {
-                const app = apps[i];
+            // Release focus before retiring buttons, including removed apps.
+            this._setFocusedApp(null);
+            for (const child of this._appGrid.get_children())
+                child.destroy();
+
+            // Search must cover all apps; only the displayed results are capped.
+            for (const app of apps) {
                 const appButton = this._createAppButton(app);
                 this._appGrid.add_child(appButton);
             }
 
-            console.debug('[MultiMonitors] App grid populated with ' + Math.min(apps.length, maxApps) + ' buttons');
+            console.debug('[MultiMonitors] App grid populated with ' + apps.length + ' buttons');
         }
 
         _connectOverviewStateWatcher() {
@@ -1274,10 +1288,11 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             }
         }
 
-        _syncAppGridState(searchText = null) {
+        async _syncAppGridState(searchText = null) {
             if (this._destroying)
                 return;
 
+            const requestId = this._appSearchRequestId = (this._appSearchRequestId ?? 0) + 1;
             const normalizedSearch = this._getSearchText(searchText).toLowerCase().trim();
             const hasText = this._visible && normalizedSearch.length > 0;
             const showApps = this._visible && this._isAppGridState();
@@ -1303,8 +1318,23 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
                 }
                 this._appDisplayVisible = false;
 
+                // Search hides the borrowed workspace actor as well as changing
+                // its geometry. Restore both when returning to the window picker.
+                if (this._visible) {
+                    this._tryFindWorkspacesViews();
+                    if (this._destroying)
+                        return;
+                }
                 this._resetWorkspacesViewTransform();
                 this._lastWorkspaceTransformKey = null;
+                if (this._visible && this._workspacesViews) {
+                    try {
+                        this._workspacesViews.visible = true;
+                        this._workspacesViews.opacity = 255;
+                    } catch (_e) {
+                        this._workspacesViews = null;
+                    }
+                }
 
                 if (this._thumbnailsBox) {
                     this._setActorVisible(this._thumbnailsBox, true);
@@ -1327,6 +1357,36 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             }
 
             const maxVisibleApps = 6; // Maximum apps to show when searching
+            let matchingIds = [];
+            if (hasText) {
+                // Use the primary overview's provider for desktop-file keywords,
+                // multi-word matching, parental controls, and usage ranking.
+                this._setFocusedApp(null);
+                for (const child of children)
+                    child.visible = false;
+                try {
+                    this._appSearchProvider ??= new AppDisplay.AppSearchProvider();
+                    matchingIds = await this._appSearchProvider.getInitialResultSet(
+                        normalizedSearch.split(/\s+/), null);
+                } catch (e) {
+                    console.debug('[MultiMonitors] App search failed: ' + e);
+                }
+                // Typing, closing, installing apps, or teardown can supersede a search.
+                if (this._destroying || requestId !== this._appSearchRequestId)
+                    return;
+
+                const buttons = new Map(children.filter(child => child._appInfo)
+                    .map(child => [child._appInfo.get_id(), child]));
+                matchingIds = matchingIds.filter(id => buttons.has(id)).slice(0, maxVisibleApps);
+                matchingIds.forEach((id, index) =>
+                    this._appGrid.set_child_at_index(buttons.get(id), index));
+                children = this._appGrid.get_children();
+            } else if (showApps && !useNativeAppDisplay) {
+                // Restore alphabetical order for the fallback app grid.
+                children.sort((a, b) =>
+                    (a._appInfo?.get_name() ?? '').localeCompare(b._appInfo?.get_name() ?? ''));
+                children.forEach((child, index) => this._appGrid.set_child_at_index(child, index));
+            }
             let visibleCount = 0;
             let firstVisibleApp = null;
 
@@ -1337,14 +1397,11 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
                         continue;
                     }
 
-                    const appName = child._appInfo.get_name().toLowerCase();
-                    const appId = child._appInfo.get_id() ? child._appInfo.get_id().toLowerCase() : '';
-
                     if (!hasText) {
                         child.visible = showApps && !useNativeAppDisplay;
                     } else {
                         // Show only first 6 matching apps horizontally
-                        const matches = appName.includes(normalizedSearch) || appId.includes(normalizedSearch);
+                        const matches = matchingIds.includes(child._appInfo.get_id());
                         if (matches && visibleCount < maxVisibleApps) {
                             child.visible = true;
                             if (!firstVisibleApp) {
@@ -1566,6 +1623,7 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             // single disconnectObject(this) per source removes them.
             Main.overview.searchController?.disconnectObject(this);
             Main.layoutManager.disconnectObject(this);
+            Shell.AppSystem.get_default().disconnectObject(this);
             this._overviewStateAdjustment?.disconnectObject(this);
             this._overviewStateAdjustment = null;
             if (resetTransforms)
@@ -1577,6 +1635,7 @@ export const MultiMonitorsControlsManager = GObject.registerClass(
             this._workspacesViews = null;
             this._lastWorkspaceTransformKey = null;
             this._focusedApp = null;
+            this._appSearchProvider = null;
             this._searchEntry = null;
         }
 
@@ -1730,6 +1789,13 @@ export class MultiMonitorsOverview {
             'showing', this._show.bind(this),
             'hiding', this._hide.bind(this),
             this._overview);
+
+        // Startup, enabling the extension, or rebuilding monitors can create
+        // this actor after `showing` was emitted. Adopt the current state so
+        // search works immediately, without closing and reopening the overview.
+        // visibleTarget excludes the closing animation, unlike visible.
+        if (Main.overview.visibleTarget)
+            this._show();
     }
 
     getWorkspacesActualGeometry() {

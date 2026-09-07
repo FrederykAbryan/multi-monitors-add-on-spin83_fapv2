@@ -203,6 +203,10 @@ rm -rf ~/.local/share/gnome-shell/extensions/multi-monitors-bar@frederykabryan
 
 ## 🛠️ Development
 
+Build the upload archive with `bash package.sh`. It includes runtime JavaScript,
+metadata, styles, the license, and schema XML. Compiled schemas are excluded;
+GNOME Shell 45+ compiles them during installation.
+
 After modifying the source:
 
 1. Run the reinstall script (or copy files manually):
