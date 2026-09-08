@@ -354,7 +354,7 @@ export class MultiMonitorsLayoutManager {
 	_pushDock(monitor) {
 		if (!this._settings.get_boolean(SHOW_DOCK_ID))
 			return;
-		const dock = new MMDock.MultiMonitorsDock(monitor);
+		const dock = new MMDock.MultiMonitorsDock(monitor, this._settings);
 		this.mmDock.push(dock);
 	}
 

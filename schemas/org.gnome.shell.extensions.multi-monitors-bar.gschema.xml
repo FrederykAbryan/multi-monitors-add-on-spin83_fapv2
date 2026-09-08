@@ -102,10 +102,21 @@
 
     <key name="show-dock-on-extended-monitors" type="b">
       <default>false</default>
-      <summary>Show overview dock on extended monitors.</summary>
+      <summary>Show dock on extended monitors.</summary>
       <description>When enabled, a native GNOME application dock is shown at the bottom
         of each extended monitor while the Activities overview is open, mirroring the
-        main monitor overview dash.</description>
+        main monitor overview dash. With reveal-dock-on-hover enabled, it also appears
+        on the desktop when the pointer reaches the bottom edge beneath the dock.</description>
+    </key>
+
+    <key name="reveal-dock-on-hover" type="b">
+      <default>true</default>
+      <summary>Reveal the dock when hovering over the bottom edge.</summary>
+      <description>Reveal the dock on the primary monitor by hovering over the
+        bottom edge beneath it, including when only one display is connected.
+        Also applies to extended monitors when show-dock-on-extended-monitors
+        is enabled. Hide the dock shortly after the pointer leaves. Disable
+        this to keep docks visible only in the Activities overview.</description>
     </key>
 
   </schema>

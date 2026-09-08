@@ -32,6 +32,7 @@ export const patchAddActorMethod = Common.patchAddActorMethod;
 export const copyClass = Common.copyClass;
 
 import * as MMLayout from './mmlayout.js';
+import * as MMDock from './mmdock.js';
 import * as MMOverview from './mmoverview.js';
 import * as MMPanel from './mmpanel.js';
 import * as ScreenshotPatch from './screenshotPatch.js';
@@ -55,6 +56,7 @@ export default class MultiMonitorsExtension extends Extension {
 		this._mu_settings = null;
 		this._mmMonitors = 0;
 		this._primaryIndex = -1;
+		this._primaryDock = null;
 		this.syncWorkspacesActualGeometry = null;
 
 		this._switchOffThumbnailsMuId = null;
@@ -249,6 +251,17 @@ export default class MultiMonitorsExtension extends Extension {
 	_relayout() {
 		const newCount = Main.layoutManager.monitors.length;
 		const newPrimary = Main.layoutManager.primaryIndex;
+		const primaryMonitor = Main.layoutManager.monitors[newPrimary];
+		if (!primaryMonitor) {
+			this._destroyPrimaryDock();
+		} else if (this._primaryDock) {
+			this._primaryDock.updateMonitor(primaryMonitor);
+		} else {
+			// The primary monitor already has GNOME's overview dash, but
+			// needs its own desktop hover dock even with no external displays.
+			this._primaryDock = new MMDock.MultiMonitorsDock(primaryMonitor,
+				this._settings, { showInOverview: false });
+		}
 		if (this._mmMonitors !== newCount || this._primaryIndex !== newPrimary) {
 			log('[MultiMonitors] _relayout: monitors ' + this._mmMonitors + '->' + newCount +
 				', primary ' + this._primaryIndex + '->' + newPrimary);
@@ -263,6 +276,11 @@ export default class MultiMonitorsExtension extends Extension {
 		if (this._settings.get_boolean('force-workspaces-on-all-displays') && this._mu_settings.get_boolean(WORKSPACES_ONLY_ON_PRIMARY_ID)) {
 			this._settings.set_string(THUMBNAILS_SLIDER_POSITION_ID, 'none');
 		}
+	}
+
+	_destroyPrimaryDock() {
+		this._primaryDock?.destroy();
+		this._primaryDock = null;
 	}
 
 	enable() {
@@ -351,6 +369,7 @@ export default class MultiMonitorsExtension extends Extension {
 	 * screen dialog is positioned on wake.
 	 */
 	_onPrepareForSleep() {
+		this._destroyPrimaryDock();
 		log('[MultiMonitors] _onPrepareForSleep: cleaning up before suspend');
 		if (this._resumeFromSleepId) {
 			GLib.source_remove(this._resumeFromSleepId);
@@ -470,6 +489,7 @@ export default class MultiMonitorsExtension extends Extension {
 	}
 
 	disable() {
+		this._destroyPrimaryDock();
 		// Unpatch screenshot UI
 		ScreenshotPatch.unpatchScreenshotUI();
 
